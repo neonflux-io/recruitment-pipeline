@@ -2,12 +2,20 @@
   "_meta": {
     "workflow": "06-offer-gate",
     "batch": 7,
-    "description": "[Recruitment] 06 — Offer Gate: Standalone manual webhook trigger. Receives offer payload from recruiter system, verifies HMAC-SHA256 signature, normalizes fields, sends Slack approval request via native Send and Wait for Response node. On approval: sends personalized offer email via Gmail and logs row to Google Sheets. On rejection: sends polite withdrawal email and logs row to Google Sheets. Offers NEVER auto-send — every offer requires explicit human approval via Slack. NOT part of the automated scoring/CRM sub-workflow chain; independently triggered by recruiter.",
+    "description": "[Recruitment] 06 — Offer Gate: Standalone manual webhook trigger. Verifies HMAC-SHA256 signature and routes invalid requests to 202 Accepted (valid) or 403 Rejected before any approval logic runs. Sends Slack approval request via native Send and Wait for Response. On approval: sends personalized offer email via Gmail and logs to Google Sheets. On rejection: sends withdrawal email and logs. Offers NEVER auto-send — explicit human approval required every time. NOT part of the automated scoring/CRM sub-workflow chain.",
     "n8nWorkflowId": "nB3kTqY7xPmWdL9c",
-    "validationStatus": "PASS — 0 errors, 13 advisory warnings (4 × 50%-confidence columns.value __rl format false-positives — column values in defineBelow mode are plain expressions not resource locators; 4 × onError advisory + 2 × Code error handling + 1 × webhook immediate-response + 1 × Slack rate limit + 1 × IF main[1] false-positive — all covered by master error workflow w6cdIL8Zop9xzd5Z and retryOnFail: true on all external API nodes)",
-    "qaStatus": "ALL PASS — PM · Lead n8n Eng · Lead Eng · Design Eng · QA Eng · Best Practices (Batch 7)",
+    "validationStatus": "PASS — 0 errors. Security hardened: responseMode:responseNode with explicit 403/202 response nodes, future-timestamp replay check, Slack mrkdwn escaping on offerDetails, formula injection strip, HMAC timing-safe comparison with explicit else branch and length invariant comment.",
+    "qaStatus": "ALL PASS — PM · Lead n8n Eng · Lead Eng · Design Eng · QA Eng · Best Practices (Batch 7) + Security Review Pass 2",
     "exportedAt": "2026-04-13",
     "codeNodeContext": "n8n Code nodes use step-through require() pattern; crypto/require calls are runtime n8n sandbox features, not browser scope",
+    "securityFixes": [
+      "F-01: Explicit else { valid = false } on HMAC length-mismatch branch + comment explaining hex-length invariant",
+      "F-02: responseMode changed from onReceived to responseNode; added IF:Valid Signature + Respond 403 + Respond 202 nodes — callers now receive explicit 403 on auth failure",
+      "F-03: offerDetails sanitized ({{ }} stripping), Slack-escaped (_slackOfferDetails, _slackCandidateName, _slackRoleApplied, _slackClientName) in Normalize node; Slack message uses escaped variants",
+      "F-07: Replay protection now rejects both expired (>5 min) AND future-dated (>30s ahead) requestedAt — prevents permanent replay via far-future timestamp",
+      "F-08: callerPolicy: workflowsFromSameOwner added to settings",
+      "F-09: offerDetails formula injection strip (leading =,+,-,@ prefixed with space) in Normalize node"
+    ],
     "placeholders": [
       "[OFFER_WEBHOOK_SECRET] — replace with your HMAC-SHA256 signing secret. Must match the secret used by your recruiter dispatch system to sign offer webhook payloads. Any secure random string (32+ chars recommended).",
       "[SLACK_CREDENTIAL_ID] — replace with your n8n slackApi credential ID. Same credential used in 04-comms-routing.",
@@ -27,11 +35,12 @@
       "roleApplied":    "string (required)",
       "offerDetails":   "string (required) — compensation, start date, benefits, any relevant details",
       "clientName":     "string (optional — defaults to 'Client')",
-      "requestedAt":    "string (required) — ISO 8601 UTC timestamp e.g. '2026-04-13T14:30:00Z'. Requests older than 5 minutes are rejected for replay protection."
+      "requestedAt":    "string (required) — ISO 8601 UTC timestamp e.g. '2026-04-13T14:30:00Z'. Requests older than 5 minutes OR more than 30 seconds in the future are rejected for replay protection."
     },
     "hmacSignatureFormat": "HMAC-SHA256. Header: x-offer-signature: sha256=<hex>. Computed over raw UTF-8 request body string using shared secret. Header name must be lowercase.",
     "approvalResponseField": "$json.data.approved — boolean true (Approved) or false (Rejected) set by Slack sendAndWait node on workflow resume.",
-    "standaloneNote": "This workflow is NOT called by any other pipeline workflow. It fires only when a recruiter manually POSTs to the webhook URL. It operates outside the automated scoring and CRM chain."
+    "standaloneNote": "This workflow is NOT called by any other pipeline workflow. It fires only when a recruiter manually POSTs to the webhook URL. It operates outside the automated scoring and CRM chain.",
+    "responseFlowNote": "responseMode:responseNode means: Respond 403 fires on auth failure (caller learns immediately); Respond 202 fires on auth success (closes HTTP connection before Slack sendAndWait begins — prevents caller timeout during long approval wait)."
   },
   "id": "nB3kTqY7xPmWdL9c",
   "name": "[Recruitment] 06 — Offer Gate",
@@ -47,7 +56,7 @@
         "httpMethod": "POST",
         "path": "offer-gate",
         "authentication": "none",
-        "responseMode": "onReceived",
+        "responseMode": "responseNode",
         "options": {
           "rawBody": true
         }
@@ -61,7 +70,52 @@
       "position": [500, 300],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// ─── Batch 7 | Verify HMAC Signature ─────────────────────────────────────────\n// Verifies HMAC-SHA256 signature on the raw webhook body.\n// Signature expected in header x-offer-signature: sha256=<hex>\n// Computed over raw body bytes using secret from env var OFFER_WEBHOOK_SECRET.\n// Uses timing-safe comparison to prevent timing oracle attacks.\n// Rejects payloads with requestedAt older than 5 minutes (replay protection).\n// Throws on any auth failure — no offer data flows without valid auth.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst crypto    = require('crypto');\nconst inputItem = $input.first();\nconst item      = inputItem.json;\n\n// ── Raw body: Webhook rawBody:true stores bytes in binary['data'] as base64 ──\nconst b64     = inputItem.binary?.['data']?.data ?? '';\nconst rawBody = b64\n  ? Buffer.from(b64, 'base64').toString('utf8')\n  : JSON.stringify(item.body ?? {});\n\nconst headers   = item.headers ?? {};\nconst sigHeader = String(headers['x-offer-signature'] ?? '').trim();\nconst secret    = $env['OFFER_WEBHOOK_SECRET'];\n\nif (!sigHeader) {\n  throw new Error('Missing x-offer-signature header. Unauthorized request rejected.');\n}\n\nif (!secret) {\n  throw new Error('OFFER_WEBHOOK_SECRET environment variable not configured.');\n}\n\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');\n\n// ── Timing-safe comparison (prevents timing oracle on secret length) ──\nconst sigBuf = Buffer.from(sigHeader, 'utf8');\nconst expBuf = Buffer.from(expected,  'utf8');\n\nlet valid = false;\nif (sigBuf.length === expBuf.length) {\n  valid = crypto.timingSafeEqual(sigBuf, expBuf);\n}\n\nif (!valid) {\n  throw new Error('HMAC signature mismatch. Unauthorized request rejected.');\n}\n\n// ── Parse body after verification ──\nconst payload = JSON.parse(rawBody);\n\n// ── Replay protection: requestedAt is REQUIRED — reject if absent or expired ──\n// Caller must include requestedAt (ISO string) in the JSON body.\nif (!payload.requestedAt) {\n  throw new Error('Missing requestedAt field. Replay protection requires an ISO timestamp in requestedAt.');\n}\nconst age = Date.now() - new Date(payload.requestedAt).getTime();\nif (age > 5 * 60 * 1000) {\n  throw new Error('Offer request expired (older than 5 minutes). Replay rejected.');\n}\n\nreturn [{ json: payload }];"
+        "jsCode": "// ─── Batch 7 | Verify HMAC Signature ─────────────────────────────────────────\n// Verifies HMAC-SHA256 signature on the raw webhook body.\n// Signature expected in header x-offer-signature: sha256=<hex>\n// Computed over raw body bytes using secret from env var OFFER_WEBHOOK_SECRET.\n// Uses timing-safe comparison to prevent timing oracle attacks.\n// Validates requestedAt replay window: rejects expired (>5 min) AND future (>30s).\n//\n// RETURNS (never throws):\n//   success: { ...payload, _hmacValid: true }\n//   failure: { _hmacValid: false, _hmacError: '...' }\n// Routes through IF: Valid Signature → Respond 202 or → Respond 403.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst crypto    = require('crypto');\nconst inputItem = $input.first();\nconst item      = inputItem.json;\n\n// ── Raw body: Webhook rawBody:true stores bytes in binary['data'] as base64 ──\nconst b64     = inputItem.binary?.['data']?.data ?? '';\nconst rawBody = b64\n  ? Buffer.from(b64, 'base64').toString('utf8')\n  : JSON.stringify(item.body ?? {});\n\nconst headers   = item.headers ?? {};\nconst sigHeader = String(headers['x-offer-signature'] ?? '').trim();\nconst secret    = $env['OFFER_WEBHOOK_SECRET'];\n\nif (!sigHeader) {\n  return [{ json: { _hmacValid: false, _hmacError: 'Missing x-offer-signature header.' } }];\n}\nif (!secret) {\n  return [{ json: { _hmacValid: false, _hmacError: 'OFFER_WEBHOOK_SECRET not configured.' } }];\n}\n\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');\n\n// ── Timing-safe comparison ──\n// Both buffers are SHA-256 hex digests with 'sha256=' prefix: always (7+64)=71 bytes\n// for a correctly-formatted signature. Length mismatch means a non-hex or truncated\n// signature — safe to reject before the constant-time path (length reveals no secret).\nconst sigBuf = Buffer.from(sigHeader, 'utf8');\nconst expBuf = Buffer.from(expected,  'utf8');\nlet valid = false;\nif (sigBuf.length === expBuf.length) {\n  valid = crypto.timingSafeEqual(sigBuf, expBuf);\n} else {\n  valid = false; // Explicit: non-hex/truncated signature is always invalid\n}\n\nif (!valid) {\n  return [{ json: { _hmacValid: false, _hmacError: 'HMAC signature mismatch.' } }];\n}\n\n// ── Parse body after verification ──\nlet payload;\ntry {\n  payload = JSON.parse(rawBody);\n} catch (e) {\n  return [{ json: { _hmacValid: false, _hmacError: 'Invalid JSON body: ' + e.message } }];\n}\n\n// ── Replay protection ──\n// requestedAt is REQUIRED. Reject if:\n//   - absent (replay protection requires it)\n//   - in the future beyond 30s clock skew tolerance (prevents far-future permanent replay bypass)\n//   - older than 5 minutes (expired)\nif (!payload.requestedAt) {\n  return [{ json: { _hmacValid: false, _hmacError: 'Missing requestedAt. Replay protection requires an ISO timestamp.' } }];\n}\nconst age = Date.now() - new Date(payload.requestedAt).getTime();\nif (age < -30 * 1000) {\n  return [{ json: { _hmacValid: false, _hmacError: 'requestedAt is in the future (>30s). Clock skew tolerance exceeded.' } }];\n}\nif (age > 5 * 60 * 1000) {\n  return [{ json: { _hmacValid: false, _hmacError: 'Offer request expired (older than 5 minutes). Replay rejected.' } }];\n}\n\n// ── Valid: spread payload at root, add routing flag ──\nreturn [{ json: { ...payload, _hmacValid: true } }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000010",
+      "name": "IF: Valid Signature",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [760, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-hmac-valid",
+              "leftValue": "={{ $json._hmacValid }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000011",
+      "name": "Respond — 403 Rejected",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [1020, 520],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"rejected\",\"reason\":\"unauthorized\"}",
+        "options": {
+          "responseCode": 403
+        }
       }
     },
     {
@@ -69,10 +123,25 @@
       "name": "Normalize Offer Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [760, 300],
+      "position": [1020, 160],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// ─── Batch 7 | Normalize Offer Payload ───────────────────────────────────────\n// Validates required fields and normalizes offer data types.\n// Sets execution context so error handler includes candidate info in Slack alerts.\n// Throws on missing required fields — no partial offer proceeds downstream.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst item = $input.first().json;\n\nconst required = ['candidateName', 'candidateEmail', 'roleApplied', 'offerDetails'];\nfor (const field of required) {\n  if (!item[field]) {\n    throw new Error('Missing required field: ' + field + '. Offer payload rejected.');\n  }\n}\n\nconst payload = {\n  candidateName:  String(item.candidateName).trim(),\n  candidateEmail: String(item.candidateEmail).trim().toLowerCase(),\n  roleApplied:    String(item.roleApplied).trim(),\n  clientName:     String(item.clientName ?? '').trim() || 'Client',\n  offerDetails:   String(item.offerDetails).trim(),\n  offeredAt:      new Date().toISOString()\n};\n\n$execution.customData.set('candidate_name',  payload.candidateName);\n$execution.customData.set('candidate_email', payload.candidateEmail);\n$execution.customData.set('role_applied',    payload.roleApplied);\n$execution.customData.set('stage',           'offer_gate');\n\nreturn [{ json: payload }];"
+        "jsCode": "// ─── Batch 7 | Normalize Offer Payload ───────────────────────────────────────\n// Validates required fields and normalizes offer data types.\n// Applies multi-layer sanitization to free-text fields:\n//   sanitize()     — strips {{ }} n8n expression delimiters, caps length\n//   escapeSlack()  — escapes &, <, > to prevent Slack mrkdwn link injection\n//   stripFormula() — prefixes leading formula chars (belt-and-suspenders over RAW mode)\n// Slack-escaped variants (_slack*) are used by the Slack approval message.\n// Strips internal _hmacValid routing flag before downstream nodes see the payload.\n// Sets execution context so error handler can identify affected candidate.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst input = $input.first().json;\n\n// ── Sanitization helpers ──\n// Strip n8n expression delimiters from free-text fields\nconst sanitize = (v, maxLen = 3000) =>\n  String(v ?? '').trim()\n    .replace(/\\{\\{[\\s\\S]*?\\}\\}/g, '')\n    .substring(0, maxLen);\n\n// Escape Slack mrkdwn <url|text> link injection vectors\nconst escapeSlack = (v) =>\n  v.replace(/&/g, '&amp;')\n   .replace(/</g, '&lt;')\n   .replace(/>/g, '&gt;');\n\n// Prevent leading formula chars being interpreted if data is re-imported to another sheet\nconst stripFormula = (v) => /^[=+\\-@]/.test(v) ? ' ' + v : v;\n\n// ── Required field validation ──\nconst required = ['candidateName', 'candidateEmail', 'roleApplied', 'offerDetails'];\nfor (const field of required) {\n  if (!input[field]) {\n    throw new Error('Missing required field: ' + field + '. Offer payload rejected.');\n  }\n}\n\nconst candidateName  = String(input.candidateName).trim();\nconst roleApplied    = sanitize(input.roleApplied, 200);\nconst clientName     = sanitize(input.clientName ?? '', 200) || 'Client';\nconst offerDetails   = stripFormula(sanitize(input.offerDetails));\n\nconst payload = {\n  candidateName,\n  candidateEmail:      String(input.candidateEmail).trim().toLowerCase(),\n  roleApplied,\n  clientName,\n  offerDetails,\n  // Slack-escaped variants for approval message (prevents <url|text> link injection)\n  _slackCandidateName: escapeSlack(candidateName),\n  _slackRoleApplied:   escapeSlack(roleApplied),\n  _slackClientName:    escapeSlack(clientName),\n  _slackOfferDetails:  escapeSlack(offerDetails),\n  offeredAt:           new Date().toISOString()\n};\n\n$execution.customData.set('candidate_name',  payload.candidateName);\n$execution.customData.set('candidate_email', payload.candidateEmail);\n$execution.customData.set('role_applied',    payload.roleApplied);\n$execution.customData.set('stage',           'offer_gate');\n\nreturn [{ json: payload }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000012",
+      "name": "Respond — 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [1280, 160],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"accepted\",\"message\":\"Offer request received and queued for approval\"}",
+        "options": {
+          "responseCode": 202
+        }
       }
     },
     {
@@ -80,7 +149,7 @@
       "name": "Slack — Approval Request",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.4,
-      "position": [1020, 300],
+      "position": [1540, 160],
       "parameters": {
         "resource": "message",
         "operation": "sendAndWait",
@@ -90,7 +159,7 @@
           "value": "[SLACK_OPS_CHANNEL_ID]",
           "mode": "id"
         },
-        "message": "={{ '*Offer Approval Required*\\n\\n*Candidate:* ' + $json.candidateName + '\\n*Role:* ' + $json.roleApplied + '\\n*Client:* ' + $json.clientName + '\\n\\n*Offer Details:*\\n' + $json.offerDetails + '\\n\\nPlease review the details and click Approve or Reject below. Offers are never sent without explicit approval.' }}",
+        "message": "={{ '*Offer Approval Required*\\n\\n*Candidate:* ' + $json._slackCandidateName + '\\n*Role:* ' + $json._slackRoleApplied + '\\n*Client:* ' + $json._slackClientName + '\\n\\n*Offer Details:*\\n' + $json._slackOfferDetails + '\\n\\nPlease review the details and click Approve or Reject below. Offers are never sent without explicit approval.' }}",
         "responseType": "approval",
         "approvalOptions": {
           "values": {
@@ -117,7 +186,7 @@
       "name": "IF: Offer Approved",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
-      "position": [1280, 300],
+      "position": [1800, 160],
       "parameters": {
         "conditions": {
           "options": {
@@ -147,7 +216,7 @@
       "name": "Gmail — Send Offer Email",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.2,
-      "position": [1540, 160],
+      "position": [2060, 80],
       "parameters": {
         "resource": "message",
         "operation": "send",
@@ -172,7 +241,7 @@
       "name": "Gmail — Send Withdrawal Email",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.2,
-      "position": [1540, 440],
+      "position": [2060, 300],
       "parameters": {
         "resource": "message",
         "operation": "send",
@@ -197,7 +266,7 @@
       "name": "Google Sheets — Log Offer Sent",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
-      "position": [1800, 160],
+      "position": [2320, 80],
       "parameters": {
         "resource": "sheet",
         "operation": "append",
@@ -256,7 +325,7 @@
       "name": "Google Sheets — Log Offer Withdrawn",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.7,
-      "position": [1800, 440],
+      "position": [2320, 300],
       "parameters": {
         "resource": "sheet",
         "operation": "append",
@@ -316,9 +385,18 @@
       "main": [[{"node": "Verify HMAC Signature", "type": "main", "index": 0}]]
     },
     "Verify HMAC Signature": {
-      "main": [[{"node": "Normalize Offer Payload", "type": "main", "index": 0}]]
+      "main": [[{"node": "IF: Valid Signature", "type": "main", "index": 0}]]
+    },
+    "IF: Valid Signature": {
+      "main": [
+        [{"node": "Normalize Offer Payload",  "type": "main", "index": 0}],
+        [{"node": "Respond — 403 Rejected",   "type": "main", "index": 0}]
+      ]
     },
     "Normalize Offer Payload": {
+      "main": [[{"node": "Respond — 202 Accepted", "type": "main", "index": 0}]]
+    },
+    "Respond — 202 Accepted": {
       "main": [[{"node": "Slack — Approval Request", "type": "main", "index": 0}]]
     },
     "Slack — Approval Request": {
@@ -343,6 +421,7 @@
     "saveDataSuccessExecution": "none",
     "saveManualExecutions": true,
     "errorWorkflow": "w6cdIL8Zop9xzd5Z",
+    "callerPolicy": "workflowsFromSameOwner",
     "availableInMCP": false
   }
 }
