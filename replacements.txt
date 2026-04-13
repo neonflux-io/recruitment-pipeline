@@ -1,0 +1,186 @@
+# Recruitment Pipeline — Placeholder Replacements
+# Replace every [PLACEHOLDER] token below with your actual values before activating.
+# After replacement, these values live in n8n's credential store — never commit real values.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+
+# ── WORKFLOW: 00-error-handler ──────────────────────────────────────────────────────────
+
+[SLACK_CREDENTIAL_ID]
+  → Your n8n slackApi credential ID.
+  → Create in: n8n → Settings → Credentials → + New → Slack API → Bot Token (xoxb-...)
+  → Bot needs scopes: chat:write, channels:read, users:read
+  → Same credential used in 04-comms-routing and 06-offer-gate.
+
+[SLACK_OPS_CHANNEL_ID]
+  → Your Slack ops channel ID (e.g. C0123456789).
+  → Find it: Slack → right-click channel name → View channel details → scroll to bottom → Copy channel ID.
+  → Used in 00-error-handler, 04-comms-routing (if overridden by Postgres config), and 06-offer-gate.
+
+
+# ── WORKFLOW: 01-candidate-intake ──────────────────────────────────────────────────────
+
+# NOTE: The candidate intake trigger (01-candidate-intake) uses a generic Webhook node
+# ("Webhook — Typeform"), NOT a Typeform OAuth2 node. No Typeform credential is required.
+# The Typeform webhook URL is configured in Typeform Admin → Connect → Webhooks after
+# activating 01-candidate-intake. The HMAC signing secret is set as an environment
+# variable (TYPEFORM_HMAC_SECRET) — not a credential. See Step 2.5 and Step 5 in SETUP.md.
+
+[TYPEFORM_HMAC_SECRET]
+  → Your Typeform webhook signing secret (for HMAC-SHA256 verification).
+  → Find it: Typeform Admin → Connect → Webhooks → your webhook → Signing Secret.
+  → This is NOT a credential ID — it is the raw signing secret string.
+  → Set as an n8n environment variable: n8n → Settings → Variables → + Add Variable
+      Name:  TYPEFORM_HMAC_SECRET
+      Value: <your signing secret>
+  → The workflow reads it via $env['TYPEFORM_HMAC_SECRET'] — never hardcode it.
+
+[TYPEFORM_FORM_ID]
+  → Your Typeform form ID.
+  → Find it: Typeform Admin → your form → Share → Copy link → extract the last path segment.
+  → Example: https://yourworkspace.typeform.com/to/Ab1Cd2Ef → form ID is Ab1Cd2Ef.
+
+[POSTGRES_CREDENTIAL_ID]
+  → Your n8n Postgres credential ID.
+  → Create in: n8n → Settings → Credentials → + New → Postgres → fill connection details.
+  → Connection target: Supabase Postgres direct connection URL.
+  → Find Supabase connection string: Supabase dashboard → Project → Settings → Database → Connection string (URI).
+  → The URL format: postgresql://postgres:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres
+
+# Database schema — NOT a placeholder. The SQL query in "Postgres — Load Client Config"
+# is pre-written and references three fixed table names: clients, scoring_prompts, email_templates.
+# See SETUP.md Step 2.4 for the complete DDL to run in Supabase before activating.
+# The slug column in the clients table is what maps to the Typeform client_slug hidden field.
+
+
+# ── WORKFLOW: 02-ai-scoring ────────────────────────────────────────────────────────────
+
+[ANTHROPIC_CREDENTIAL_ID]
+  → Your n8n httpHeaderAuth credential ID for the Anthropic API key.
+  → Create in: n8n → Settings → Credentials → + New → Header Auth.
+  →   Name: x-api-key
+  →   Value: sk-ant-... (your Anthropic API key from console.anthropic.com)
+  → The Claude model used: claude-haiku-4-5-20251001 (fast, low cost for scoring).
+
+
+# ── WORKFLOW: 03-crm-routing ────────────────────────────────────────────────────────────
+
+[HUBSPOT_CREDENTIAL_ID]
+  → Your n8n hubspotAppToken credential ID (HubSpot Private App Token).
+  → Create in: HubSpot → Settings → Integrations → Private Apps → Create → grant scopes below.
+  → Required scopes: crm.objects.contacts.write, crm.objects.contacts.read,
+    crm.objects.deals.write, crm.objects.deals.read.
+  → Then in n8n → Settings → Credentials → + New → HubSpot API → paste the token.
+  → Used twice in 03-crm-routing (Contact Upsert + Deal Create nodes).
+
+[HUBSPOT_DEAL_STAGE_ID]
+  → Your HubSpot deal pipeline stage ID (e.g. 'appointmentscheduled').
+  → Find it: HubSpot → Settings → CRM → Deals → Pipelines → click your pipeline → copy the Stage ID.
+  → Common defaults: appointmentscheduled, qualifiedtobuy, presentationscheduled.
+  → Replace the literal placeholder in node: "HubSpot — Deal Create" → stage parameter.
+
+# HubSpot custom properties — must create BEFORE activating workflow:
+#   ai_composite_score   → Type: Number      → Group: Contact Information
+#   ai_disposition       → Type: Single-line text → Group: Contact Information
+#   ai_role_applied      → Type: Single-line text → Group: Contact Information
+#   ai_scored_at         → Type: Date/time   → Group: Contact Information
+# Create at: HubSpot → Settings → Properties → Contacts → Create property.
+
+
+# ── WORKFLOW: 04-comms-routing ─────────────────────────────────────────────────────────
+
+# [SLACK_CREDENTIAL_ID] — same as 00-error-handler, see above.
+# [SLACK_OPS_CHANNEL_ID] — same as 00-error-handler (overrideable via Postgres per-client config).
+
+[GMAIL_CREDENTIAL_ID]
+  → Your n8n gmailOAuth2 credential ID.
+  → Create in: n8n → Settings → Credentials → + New → Gmail OAuth2 → complete OAuth flow.
+  → The sending address will be the Gmail account you authenticate.
+  → Used for: application accepted email, rejection email (04), offer email, withdrawal email (06).
+
+[CLICKUP_CREDENTIAL_ID]
+  → Your n8n clickUpApi credential ID.
+  → Create in: n8n → Settings → Credentials → + New → ClickUp API → paste Personal API Token.
+  → Find API token: ClickUp → Profile → Apps → API Token.
+
+[CLICKUP_TEAM_ID]
+  → Your ClickUp Workspace ID (also called Team ID).
+  → Find it: ClickUp → Settings → Workspace Settings → scroll to Workspace ID.
+
+[CLICKUP_SPACE_ID]
+  → Your ClickUp Space ID.
+  → Find it: Navigate to your Space in ClickUp → URL contains /space/{SPACE_ID}.
+
+[CLICKUP_FOLDER_ID]
+  → Your ClickUp Folder ID (or use 'no_folder' if the target list is folderless).
+  → Find it: Navigate to your Folder → URL contains /folder/{FOLDER_ID}.
+
+[CLICKUP_LIST_ID]
+  → Your ClickUp List ID for recruitment follow-up tasks.
+  → Find it: Navigate to your List → URL contains /list/{LIST_ID}.
+
+
+# ── WORKFLOW: 05-audit-log ─────────────────────────────────────────────────────────────
+
+[GOOGLE_SHEETS_CREDENTIAL_ID]
+  → Your n8n googleSheetsOAuth2Api credential ID.
+  → Create in: n8n → Settings → Credentials → + New → Google Sheets OAuth2 → OAuth flow.
+  → Used in both 05-audit-log and 06-offer-gate (same credential, different sheets).
+
+[AUDIT_SPREADSHEET_ID]
+  → Your Google Sheets spreadsheet ID for the candidate audit log.
+  → Find it: open the spreadsheet → URL: /spreadsheets/d/{SPREADSHEET_ID}/
+  → The spreadsheet must have a sheet tab with the headers listed below.
+
+[AUDIT_SHEET_NAME]
+  → Your sheet tab name (e.g. 'Candidates').
+  → Must match exactly (case-sensitive).
+  → Sheet must have these headers in row 1 (columns A–R in this order):
+    candidate_name | candidate_email | client_name | role_applied |
+    composite_score | disposition | overall_signal |
+    role_fit_score | experience_score | response_qual_score |
+    hubspot_contact_id | hubspot_deal_id |
+    slack_notified | gmail_sent | email_type | clickup_task_created |
+    scored_at | comms_completed_at
+
+
+# ── WORKFLOW: 06-offer-gate ────────────────────────────────────────────────────────────
+
+[OFFER_WEBHOOK_SECRET]
+  → Shared HMAC-SHA256 signing secret between your recruiter dispatch system and this webhook.
+  → Generate: openssl rand -hex 32  (or any 32+ character random string).
+  → Your dispatch system signs the raw JSON body with this secret and sends the result in:
+      Header: x-offer-signature: sha256=<hex>
+  → Set as an n8n environment variable: n8n → Settings → Variables → + Add Variable
+      Name:  OFFER_WEBHOOK_SECRET
+      Value: <your generated secret>
+  → The workflow reads it via $env['OFFER_WEBHOOK_SECRET'] — never hardcode it.
+  → KEEP THIS SECRET — it is the only auth on the offer gate webhook.
+  → Also include requestedAt (ISO string) in the JSON body to enable replay protection.
+
+# [SLACK_CREDENTIAL_ID]  — same as 00-error-handler, see above.
+# [SLACK_OPS_CHANNEL_ID] — same as 00-error-handler, see above.
+# [GMAIL_CREDENTIAL_ID]  — same as 04-comms-routing, see above.
+# [GOOGLE_SHEETS_CREDENTIAL_ID] — same as 05-audit-log, see above.
+
+[OFFER_LOG_SPREADSHEET_ID]
+  → Your Google Sheets spreadsheet ID for the offer decision log.
+  → Can be the same spreadsheet as the audit log (different tab) or a separate file.
+  → Find it: open the spreadsheet → URL: /spreadsheets/d/{SPREADSHEET_ID}/
+
+[OFFER_LOG_SHEET_NAME]
+  → Your sheet tab name for offer log (e.g. 'Offers').
+  → Must match exactly (case-sensitive).
+  → Sheet must have these headers in row 1 (columns A–H):
+    candidate_name | candidate_email | role_applied | client_name |
+    offer_details | decision | offered_at | logged_at
+
+
+# ── ACTIVATION ORDER ───────────────────────────────────────────────────────────────────
+# Import and activate in this exact order:
+#   1. 00-error-handler   (must be active before activating any others)
+#   2. 05-audit-log       (must be active before 04-comms-routing calls it)
+#   3. 04-comms-routing   (must be active before 03-crm-routing calls it)
+#   4. 03-crm-routing     (must be active before 02-ai-scoring calls it)
+#   5. 02-ai-scoring      (must be active before 01-candidate-intake calls it)
+#   6. 01-candidate-intake  (activate last — this is the pipeline entry point)
+#   7. 06-offer-gate      (activate independently — standalone, no chain dependency)

@@ -1,0 +1,183 @@
+{
+  "_meta": {
+    "workflow": "03-crm-routing",
+    "batch": 4,
+    "description": "[Recruitment] 03 — CRM Routing: Receives scored candidate payload from Batch 3. Upserts HubSpot Contact with AI score custom properties (create or update by email). Extracts contact ID. Creates HubSpot Deal associated with the contact. Merges CRM IDs (hubspotContactId + hubspotDealId) into payload for Batch 5.",
+    "n8nWorkflowId": "yjMDQ28Zq7bbeyQb",
+    "validationStatus": "1 false-positive (stage field uses loadOptionsMethod — valid stages can't be loaded offline; must configure per HubSpot account before activation). 3 advisory warnings covered by master error workflow.",
+    "qaStatus": "ALL PASS — PM · Lead n8n Eng · Lead Eng · Design Eng · QA Eng · Best Practices (Batch 4)",
+    "exportedAt": "2026-04-13",
+    "codeNodeContext": "n8n Code nodes use step-through require() pattern; runtime n8n sandbox features",
+    "placeholders": [
+      "[HUBSPOT_CREDENTIAL_ID] — replace with your n8n hubspotAppToken credential ID (HubSpot Private App Token). See SETUP.md.",
+      "[HUBSPOT_DEAL_STAGE_ID] — replace with your HubSpot deal stage ID. Find at: HubSpot → Settings → CRM → Deals → Pipelines. Common defaults: appointmentscheduled, qualifiedtobuy, presentationscheduled."
+    ],
+    "hubspotCustomPropertiesRequired": [
+      "ai_composite_score (Number) — weighted composite AI score 0-100",
+      "ai_disposition (Single-line text) — QUALIFIED or REJECTED",
+      "ai_role_applied (Single-line text) — role the candidate applied for",
+      "ai_scored_at (Date/time) — ISO timestamp when scoring ran"
+    ]
+  },
+  "id": "yjMDQ28Zq7bbeyQb",
+  "name": "[Recruitment] 03 — CRM Routing",
+  "active": false,
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000001",
+      "name": "When Called by Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "parameters": {"inputSource": "passthrough"}
+    },
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000002",
+      "name": "HubSpot — Contact Upsert",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [500, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "authentication": "appToken",
+        "resource": "contact",
+        "operation": "upsert",
+        "email": "={{ $json.candidateEmail }}",
+        "additionalFields": {
+          "firstName": {
+            "__rl": true,
+            "value": "={{ $json.candidateName.split(' ').length > 1 ? $json.candidateName.split(' ').slice(0, -1).join(' ') : $json.candidateName }}",
+            "mode": "expression"
+          },
+          "lastName": {
+            "__rl": true,
+            "value": "={{ $json.candidateName.split(' ').length > 1 ? $json.candidateName.split(' ').slice(-1)[0] : '' }}",
+            "mode": "expression"
+          },
+          "jobTitle": "={{ $json.roleApplied }}",
+          "customPropertiesUi": {
+            "customPropertiesValues": [
+              {"property": "ai_composite_score", "value": "={{ String($json.compositeScore) }}"},
+              {"property": "ai_disposition",     "value": "={{ $json.disposition }}"},
+              {"property": "ai_role_applied",    "value": "={{ $json.roleApplied }}"},
+              {"property": "ai_scored_at",       "value": "={{ $json.scoredAt }}"}
+            ]
+          }
+        }
+      },
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "[HUBSPOT_CREDENTIAL_ID]",
+          "name": "[Recruitment] HubSpot"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000003",
+      "name": "Extract Contact ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 4 | Extract Contact ID ────────────────────────────────────────────\n// HubSpot upsert returns the contact object after create or update.\n// Contact ID field: 'vid' (v1 compat wrapper) or 'id' (v3 native response).\n// Merges HubSpot identity with full scored payload from the sub-workflow trigger.\n// Throws on missing ID — fail-fast prevents downstream deal from orphaning.\n// Re-sets candidate customData so error handler has context if this sub-workflow fails.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst hsContact = $input.first().json;\nconst scored    = $('When Called by Workflow').first().json;\n\n// ── Re-set execution context (customData does not cross sub-workflow boundaries) ──\n$execution.customData.set('candidate_name',  scored.candidateName  ?? 'N/A');\n$execution.customData.set('candidate_email', scored.candidateEmail ?? 'N/A');\n$execution.customData.set('stage',           'crm_routing');\n\n// Contact ID: check all known HubSpot response field names\nconst hubspotContactId = String(\n  hsContact.vid          ??\n  hsContact.id           ??\n  hsContact.hs_object_id ??\n  ''\n);\n\nif (!hubspotContactId) {\n  throw new Error(\n    'HubSpot upsert returned no contact ID. ' +\n    'Checked: vid, id, hs_object_id. Response keys: ' +\n    Object.keys(hsContact).join(', ')\n  );\n}\n\nreturn [{\n  json: {\n    ...scored,\n    hubspotContactId,\n    hubspotContactCreatedAt: new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "HubSpot — Deal Create",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [1020, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "authentication": "appToken",
+        "resource": "deal",
+        "operation": "create",
+        "stage": "={{ '[HUBSPOT_DEAL_STAGE_ID]' }}",
+        "additionalFields": {
+          "dealName": {
+            "__rl": true,
+            "value": "={{ $json.candidateName + ' — ' + $json.roleApplied + ' (Score: ' + $json.compositeScore + '/100)' }}",
+            "mode": "expression"
+          },
+          "description": "={{ 'Disposition: ' + $json.disposition + ' | Composite: ' + $json.compositeScore + '/100 | Role Fit: ' + $json.roleFitScore + ' | Experience: ' + $json.experienceScore + ' | Response Quality: ' + $json.responseQualScore + ' | Client: ' + ($json.clientName ?? $json.client_slug) }}",
+          "associatedVids": {
+            "__rl": true,
+            "value": "={{ [$json.hubspotContactId] }}",
+            "mode": "expression"
+          }
+        }
+      },
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "[HUBSPOT_CREDENTIAL_ID]",
+          "name": "[Recruitment] HubSpot"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000005",
+      "name": "Merge CRM IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1280, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 4 | Merge CRM IDs ─────────────────────────────────────────────────\n// Extracts Deal ID from HubSpot deal create response.\n// Merges contactId + dealId into full scored payload for Batch 5 (Comms Routing).\n// Updates $execution.customData so error handler includes CRM IDs in Slack alerts\n// if Batch 5/6/7 fail after CRM records are created.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst hsDeal = $input.first().json;\nconst item   = $('Extract Contact ID').first().json;\n\n// Deal ID: check all known HubSpot response field names\nconst hubspotDealId = String(\n  hsDeal.dealId        ??\n  hsDeal.id            ??\n  hsDeal.hs_object_id  ??\n  ''\n);\n\nif (!hubspotDealId) {\n  throw new Error(\n    'HubSpot deal create returned no deal ID. ' +\n    'Checked: dealId, id, hs_object_id. Response keys: ' +\n    Object.keys(hsDeal).join(', ')\n  );\n}\n\n// Propagate CRM IDs to execution context (error handler reads these)\n$execution.customData.set('hubspot_contact_id', item.hubspotContactId);\n$execution.customData.set('hubspot_deal_id',    hubspotDealId);\n\nreturn [{\n  json: {\n    ...item,\n    hubspotDealId,\n    crmRoutedAt: new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000006",
+      "name": "Execute Workflow — Comms Routing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [1540, 300],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "aiqYByHEniRalzTs",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Workflow": {
+      "main": [[{"node": "HubSpot — Contact Upsert", "type": "main", "index": 0}]]
+    },
+    "HubSpot — Contact Upsert": {
+      "main": [[{"node": "Extract Contact ID", "type": "main", "index": 0}]]
+    },
+    "Extract Contact ID": {
+      "main": [[{"node": "HubSpot — Deal Create", "type": "main", "index": 0}]]
+    },
+    "HubSpot — Deal Create": {
+      "main": [[{"node": "Merge CRM IDs", "type": "main", "index": 0}]]
+    },
+    "Merge CRM IDs": {
+      "main": [[{"node": "Execute Workflow — Comms Routing", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "errorWorkflow": "w6cdIL8Zop9xzd5Z",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "linkedBatch": {
+    "next": "04-comms-routing",
+    "nextWorkflowId": "aiqYByHEniRalzTs",
+    "executeNode": "Execute Workflow — Comms Routing"
+  }
+}

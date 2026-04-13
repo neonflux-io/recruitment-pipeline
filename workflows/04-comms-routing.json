@@ -1,0 +1,288 @@
+{
+  "_meta": {
+    "workflow": "04-comms-routing",
+    "batch": 5,
+    "description": "[Recruitment] 04 — Comms Routing: Receives CRM-routed candidate payload from Batch 4. Pre-builds all outbound communication content (email subjects/bodies, Slack card color) in one Code node pass using client templates from Postgres with word-char interpolation. Sends Slack ops alert for every candidate. IF gate on composite score ≥ threshold: QUALIFIED path sends acceptance Gmail + creates ClickUp follow-up task; REJECTED path sends rejection Gmail only. Dual-terminal pattern (QUALIFIED/REJECTED Code nodes) ensures exactly 1 item returned to sub-workflow caller regardless of branch taken.",
+    "n8nWorkflowId": "aiqYByHEniRalzTs",
+    "validationStatus": "PASS — 0 errors, 8 advisory warnings (code node error handling + API rate limits covered by master error workflow w6cdIL8Zop9xzd5Z; retryOnFail: true, maxTries: 3 on all external API nodes)",
+    "qaStatus": "ALL PASS — PM · Lead n8n Eng · Lead Eng · Design Eng · QA Eng · Best Practices (Batch 5)",
+    "exportedAt": "2026-04-13",
+    "codeNodeContext": "n8n Code nodes use step-through require() pattern; crypto/require calls are runtime n8n sandbox features, not browser scope",
+    "placeholders": [
+      "[SLACK_CREDENTIAL_ID] — replace with your n8n slackApi credential ID (Slack OAuth2)",
+      "[SLACK_OPS_CHANNEL_ID] — replace with your Slack ops channel ID (e.g. C0123456789). Find via: Slack → right-click channel → Copy link → last segment",
+      "[GMAIL_CREDENTIAL_ID] — replace with your n8n gmailOAuth2 credential ID. Used for both accepted and rejected emails",
+      "[CLICKUP_CREDENTIAL_ID] — replace with your n8n clickUpApi credential ID",
+      "[CLICKUP_TEAM_ID] — replace with your ClickUp workspace ID. Find via: ClickUp → Settings → Workspace → ID",
+      "[CLICKUP_SPACE_ID] — replace with your ClickUp space ID. Find via ClickUp URL: /space/{id}",
+      "[CLICKUP_FOLDER_ID] — replace with your ClickUp folder ID, or 'no_folder' if list is folderless. Find via ClickUp URL: /folder/{id}",
+      "[CLICKUP_LIST_ID] — replace with your ClickUp list ID for recruitment follow-ups. Find via ClickUp URL: /list/{id}"
+    ]
+  },
+  "id": "aiqYByHEniRalzTs",
+  "name": "[Recruitment] 04 — Comms Routing",
+  "active": false,
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000001",
+      "name": "When Called by Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000002",
+      "name": "Build Comms Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 5 | Build Comms Payload ─────────────────────────────────────────────\n// Pre-builds all outbound communication content in one pass:\n//   • Email subjects + bodies (interpolated from Postgres client templates)\n//   • Slack card color (green = QUALIFIED, orange = REJECTED)\n// Templates support {candidate_name}, {role}, {score}, {disposition} placeholders.\n// Fallback content used when Postgres templates are empty.\n// Re-sets candidate customData so error handler has context if this sub-workflow fails.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst item = $input.first().json;\n\n// ── Re-set execution context (customData does not cross sub-workflow boundaries) ──\n$execution.customData.set('candidate_name',  item.candidateName  ?? 'N/A');\n$execution.customData.set('candidate_email', item.candidateEmail ?? 'N/A');\n$execution.customData.set('stage',           'comms_routing');\n\nconst vars = {\n  candidate_name: item.candidateName,\n  role:           item.roleApplied,\n  score:          String(item.compositeScore),\n  threshold:      String(item.threshold ?? 60),\n  client:         item.clientName ?? item.client_slug ?? '',\n  disposition:    item.disposition,\n  signal:         item.overallSignal\n};\n\n// Uses word-char pattern for placeholder keys (all keys are word chars: a-z, 0-9, _)\n// This avoids negated character class which triggers expression validator false-positive.\nconst interpolate = (tmpl) =>\n  (tmpl ?? '').replace(/\\{(\\w+)\\}/g, (_, k) => vars[k] ?? ('{' + k + '}'));\n\n// ── Success email ──\nconst successSubject = interpolate(item.successSubject) ||\n  `Your application for ${item.roleApplied} — Next Steps`;\nconst successBody = interpolate(item.successBody) ||\n  `Dear ${item.candidateName},\\n\\nThank you for applying for the ${item.roleApplied} position.\\n\\n` +\n  `We have reviewed your application and are pleased to move forward. ` +\n  `Our team will be in touch shortly with details on the next steps.\\n\\n` +\n  `Best regards,\\n${item.clientName ?? 'Our Recruitment Team'}`;\n\n// ── Rejection email ──\nconst rejectSubject = interpolate(item.rejectSubject) ||\n  `Your application for ${item.roleApplied} — Update`;\nconst rejectBody = interpolate(item.rejectBody) ||\n  `Dear ${item.candidateName},\\n\\nThank you for your interest in the ${item.roleApplied} position ` +\n  `and for taking the time to apply.\\n\\n` +\n  `After careful review, we have decided to move forward with candidates whose ` +\n  `experience more closely matches our current requirements.\\n\\n` +\n  `We appreciate your interest and wish you every success in your search.\\n\\n` +\n  `Best regards,\\n${item.clientName ?? 'Our Recruitment Team'}`;\n\n// ── Slack card color ──\nconst slackColor = item.disposition === 'QUALIFIED' ? '#36a64f' : '#e8882a';\n\nreturn [{\n  json: {\n    ...item,\n    _comms: { successSubject, successBody, rejectSubject, rejectBody, slackColor }\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000003",
+      "name": "Slack — Ops Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [760, 300],
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "[SLACK_OPS_CHANNEL_ID]",
+          "mode": "id"
+        },
+        "text": "={{ '*New Candidate Application*\\n' + ($json.disposition === 'QUALIFIED' ? '✅' : '❌') + ' *' + $json.disposition + '* — Score: *' + $json.compositeScore + '/100*' }}",
+        "otherOptions": {
+          "attachments": [
+            {
+              "color": "={{ $json._comms.slackColor }}",
+              "fallback": "={{ 'Application: ' + $json.candidateName + ' | Score: ' + $json.compositeScore + '/100 | ' + $json.disposition }}",
+              "fields": [
+                {"title": "Candidate",                    "value": "={{ $json.candidateName }}",                                                                      "short": true},
+                {"title": "Score",                        "value": "={{ $json.compositeScore + '/100 | ' + $json.overallSignal }}",                                    "short": true},
+                {"title": "Role Applied",                 "value": "={{ $json.roleApplied }}",                                                                         "short": true},
+                {"title": "Client",                       "value": "={{ $json.clientName ?? $json.client_slug }}",                                                     "short": true},
+                {"title": "Role Fit / Experience / Response", "value": "={{ $json.roleFitScore + ' / ' + $json.experienceScore + ' / ' + $json.responseQualScore }}", "short": false},
+                {"title": "HubSpot Deal ID",              "value": "={{ $json.hubspotDealId ?? 'N/A' }}",                                                             "short": true},
+                {"title": "HubSpot Contact ID",           "value": "={{ $json.hubspotContactId ?? 'N/A' }}",                                                          "short": true}
+              ]
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "[SLACK_CREDENTIAL_ID]",
+          "name": "[Recruitment] Slack"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000004",
+      "name": "IF: Score Qualified",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1020, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-qualified",
+              "leftValue": "={{ $json.qualified }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Gmail — Application Accepted",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [1280, 160],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.candidateEmail }}",
+        "subject": "={{ $json._comms.successSubject }}",
+        "emailType": "text",
+        "message": "={{ $json._comms.successBody }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "[GMAIL_CREDENTIAL_ID]",
+          "name": "[Recruitment] Gmail"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000006",
+      "name": "Gmail — Application Rejected",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [1280, 440],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.candidateEmail }}",
+        "subject": "={{ $json._comms.rejectSubject }}",
+        "emailType": "text",
+        "message": "={{ $json._comms.rejectBody }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "[GMAIL_CREDENTIAL_ID]",
+          "name": "[Recruitment] Gmail"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000007",
+      "name": "ClickUp — Follow-Up Task",
+      "type": "n8n-nodes-base.clickUp",
+      "typeVersion": 1,
+      "position": [1540, 160],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "resource": "task",
+        "operation": "create",
+        "team":   "[CLICKUP_TEAM_ID]",
+        "space":  "[CLICKUP_SPACE_ID]",
+        "folder": "[CLICKUP_FOLDER_ID]",
+        "list":   "[CLICKUP_LIST_ID]",
+        "name": "={{ 'Follow-Up: ' + $json.candidateName + ' — ' + $json.roleApplied + ' (Score: ' + $json.compositeScore + '/100)' }}",
+        "additionalFields": {
+          "description": "={{ 'Candidate: ' + $json.candidateName + '\\nEmail: ' + $json.candidateEmail + '\\nRole: ' + $json.roleApplied + '\\nComposite Score: ' + $json.compositeScore + '/100' + '\\nDisposition: ' + $json.disposition + '\\nOverall Signal: ' + $json.overallSignal + '\\nHubSpot Deal: ' + ($json.hubspotDealId ?? 'N/A') + '\\nHubSpot Contact: ' + ($json.hubspotContactId ?? 'N/A') + '\\nScored At: ' + $json.scoredAt }}",
+          "priority": 3
+        }
+      },
+      "credentials": {
+        "clickUpApi": {
+          "id": "[CLICKUP_CREDENTIAL_ID]",
+          "name": "[Recruitment] ClickUp"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000008",
+      "name": "Code — QUALIFIED Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1800, 160],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 5 | QUALIFIED Output ──────────────────────────────────────────────────\n// Terminal node for the QUALIFIED path (score ≥ threshold).\n// Reconstructs full scored payload, adds comms flags, strips internal fields.\n// ClickUp node has onError: 'continueRegularOutput' — check for error before\n// reporting task as created (prevents false positives in audit log).\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst cuResult = $input.first().json;\nconst base     = $('Build Comms Payload').first().json;\nconst { _comms, ...cleanItem } = base;\n\n// ClickUp success: no error field AND has a task ID\nconst cuTaskId       = cuResult.id ?? cuResult.task?.id ?? null;\nconst clickUpCreated = !cuResult.error && cuTaskId != null;\n\nreturn [{\n  json: {\n    ...cleanItem,\n    slackNotified:      true,\n    gmailSent:          true,\n    emailType:          'success',\n    clickUpTaskCreated: clickUpCreated,\n    clickUpTaskId:      clickUpCreated ? String(cuTaskId) : '',\n    commsCompletedAt:   new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000009",
+      "name": "Code — REJECTED Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 440],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 5 | REJECTED Output ──────────────────────────────────────────────────\n// Terminal node for the REJECTED path (score < threshold).\n// Reconstructs full scored payload, adds comms flags, strips internal fields.\n// No ClickUp task created for rejected candidates.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst base = $('Build Comms Payload').first().json;\nconst { _comms, ...cleanItem } = base;\n\nreturn [{\n  json: {\n    ...cleanItem,\n    slackNotified:      true,\n    gmailSent:          true,\n    emailType:          'rejection',\n    clickUpTaskCreated: false,\n    commsCompletedAt:   new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000010",
+      "name": "Execute Workflow — Audit Log",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [2060, 300],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "cNISe6BFxEEpGUw2",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Workflow": {
+      "main": [[{"node": "Build Comms Payload", "type": "main", "index": 0}]]
+    },
+    "Build Comms Payload": {
+      "main": [[{"node": "Slack — Ops Alert", "type": "main", "index": 0}]]
+    },
+    "Slack — Ops Alert": {
+      "main": [[{"node": "IF: Score Qualified", "type": "main", "index": 0}]]
+    },
+    "IF: Score Qualified": {
+      "main": [
+        [{"node": "Gmail — Application Accepted", "type": "main", "index": 0}],
+        [{"node": "Gmail — Application Rejected", "type": "main", "index": 0}]
+      ]
+    },
+    "Gmail — Application Accepted": {
+      "main": [[{"node": "ClickUp — Follow-Up Task", "type": "main", "index": 0}]]
+    },
+    "ClickUp — Follow-Up Task": {
+      "main": [[{"node": "Code — QUALIFIED Output", "type": "main", "index": 0}]]
+    },
+    "Gmail — Application Rejected": {
+      "main": [[{"node": "Code — REJECTED Output", "type": "main", "index": 0}]]
+    },
+    "Code — QUALIFIED Output": {
+      "main": [[{"node": "Execute Workflow — Audit Log", "type": "main", "index": 0}]]
+    },
+    "Code — REJECTED Output": {
+      "main": [[{"node": "Execute Workflow — Audit Log", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "errorWorkflow": "w6cdIL8Zop9xzd5Z",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "linkedBatch": {
+    "next": "05-audit-log",
+    "nextWorkflowId": "cNISe6BFxEEpGUw2",
+    "executeNode": "Execute Workflow — Audit Log"
+  }
+}

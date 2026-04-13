@@ -1,0 +1,29 @@
+# Credentials and secrets — NEVER commit
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials/
+*credentials*.json
+*credential*.json
+
+# n8n runtime files
+.n8n/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor artifacts
+.vscode/
+.idea/
+*.swp
+
+# Node modules (if any scripts added later)
+node_modules/
+
+# Workflow JSONs are intentionally NOT ignored — they are safe to commit.
+# Credentials are stored by n8n credential ID only, never as actual API keys.
+# workflows/*.json — NOT ignored

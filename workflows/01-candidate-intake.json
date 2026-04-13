@@ -1,0 +1,324 @@
+{
+  "name": "[Recruitment] 01 — Candidate Intake",
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000001",
+      "name": "Webhook — Typeform",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "recruitment/intake",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "HMAC Verify + Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 2 | HMAC Verify + Extract ─────────────────────────────────────\n// Verifies Typeform HMAC-SHA256 signature (fail-closed).\n// rawBody stored in binary['data'] by Webhook rawBody:true option.\n// Extracts client_slug from hidden field + candidate fields from answers.\n// ─────────────────────────────────────────────────────────────────────────\n\nconst crypto = require('crypto');\nconst HMAC_SECRET = $env['TYPEFORM_HMAC_SECRET'];\n\nconst inputItem = $input.first();\nconst item      = inputItem.json;\n\n// ── Raw body (Webhook rawBody:true stores bytes in binary['data']) ──\nconst b64 = inputItem.binary?.['data']?.data ?? '';\nconst rawBody = b64\n  ? Buffer.from(b64, 'base64').toString('utf8')\n  : JSON.stringify(item.body ?? {});\n\n// ── Typeform signature header: \"sha256=<hex>\" ──\nconst sigHeader = (item.headers?.['typeform-signature'] ?? '').trim();\nconst signature = sigHeader.replace(/^sha256=/, '');\n\nlet valid = false;\nlet verifyError = null;\n\ntry {\n  if (!signature) {\n    verifyError = 'Missing typeform-signature header';\n  } else {\n    const expected = crypto\n      .createHmac('sha256', HMAC_SECRET)\n      .update(rawBody, 'utf8')\n      .digest('hex');\n\n    const sigBuf = Buffer.from(signature, 'utf8');\n    const expBuf = Buffer.from(expected,  'utf8');\n\n    // timingSafeEqual requires equal-length buffers\n    // (prevents timing oracle on length mismatch)\n    if (sigBuf.length === expBuf.length) {\n      valid = crypto.timingSafeEqual(sigBuf, expBuf);\n    }\n  }\n} catch (err) {\n  verifyError = err.message;\n  valid = false; // fail-closed: any crypto error = rejected\n}\n\n// ── Extract Typeform form response ──\nconst body         = item.body ?? {};\nconst formResponse = body.form_response ?? {};\nconst hidden       = formResponse.hidden ?? {};\nconst answers      = formResponse.answers ?? [];\n\n// Build field ref → value map\nconst fieldMap = {};\nfor (const ans of answers) {\n  const ref = ans.field?.ref ?? ans.field?.id ?? '';\n  if (!ref) continue;\n  switch (ans.type) {\n    case 'text':       fieldMap[ref] = ans.text;   break;\n    case 'email':      fieldMap[ref] = ans.email;  break;\n    case 'number':     fieldMap[ref] = ans.number; break;\n    case 'long_text':  fieldMap[ref] = ans.text;   break;\n    default:           fieldMap[ref] = ans[ans.type] ?? null;\n  }\n}\n\n// ── Candidate fields (field refs match Typeform form setup in SETUP.md) ──\nconst candidateName      = fieldMap['full_name']  ?? hidden.full_name  ?? '';\nconst candidateEmail     = fieldMap['email']       ?? hidden.email      ?? '';\nconst roleApplied        = fieldMap['role']        ?? hidden.role       ?? '';\nconst yearsExperience    = fieldMap['experience']  ?? '';\nconst coverNote          = fieldMap['cover_note']  ?? '';\nconst clientSlug         = hidden.client_slug      ?? 'default';\nconst typeformResponseId = formResponse.token      ?? body.event_id     ?? '';\nconst submittedAt        = formResponse.submitted_at ?? new Date().toISOString();\n\nreturn [{\n  json: {\n    valid,\n    verifyError,\n    candidateName,\n    candidateEmail,\n    roleApplied,\n    yearsExperience,\n    coverNote,\n    client_slug:        clientSlug,\n    typeformResponseId,\n    submittedAt\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000003",
+      "name": "IF: Valid Signature",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [760, 300],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-sig-valid",
+              "leftValue": "={{ $json.valid }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000004",
+      "name": "Respond — 403 Rejected",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [1020, 520],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"rejected\",\"reason\":\"invalid_signature\"}",
+        "options": {
+          "responseCode": 403
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000005",
+      "name": "Normalize Candidate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1020, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 2 | Normalize Candidate ───────────────────────────────────────\n// Sanitizes all candidate fields and generates idempotency key.\n// Idempotency key format: idem_<base36 ts>_<random hex>_<typeform token prefix>\n// Prevents duplicate processing if Typeform retries the webhook.\n// ─────────────────────────────────────────────────────────────────────────\n\nconst crypto = require('crypto');\nconst item   = $input.first().json;\n\nconst trim      = (v) => String(v ?? '').trim();\n// Strip n8n expression delimiters from free-text fields to prevent injection.\nconst sanitize  = (v) => trim(v).replace(/\\{\\{[\\s\\S]*?\\}\\}/g, '');\nconst titleCase = (s) =>\n  s.replace(/\\w\\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());\n\nconst candidateName  = titleCase(sanitize(item.candidateName));\nconst candidateEmail = sanitize(item.candidateEmail).toLowerCase();\nconst roleApplied    = sanitize(item.roleApplied);\nconst yearsExpRaw    = trim(String(item.yearsExperience ?? ''));\nconst yearsExp       = yearsExpRaw !== '' && !isNaN(Number(yearsExpRaw))\n  ? Number(yearsExpRaw)\n  : yearsExpRaw;\nconst coverNote      = sanitize(item.coverNote).substring(0, 2000);\nconst clientSlug     = trim(item.client_slug)\n  .toLowerCase()\n  .replace(/[^a-z0-9-]/g, '')\n  || 'default';\n\n// ── Email format validation ──\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!emailRegex.test(candidateEmail)) {\n  throw new Error('Invalid candidate email format: ' + candidateEmail);\n}\n\n// ── Idempotency key (cryptographically secure) ──\nconst ts36    = Date.now().toString(36);\nconst rnd     = crypto.randomBytes(4).toString('hex');\nconst tfPfx   = (item.typeformResponseId ?? '').substring(0, 8);\nconst idemKey = `idem_${ts36}_${rnd}_${tfPfx}`;\n\nreturn [{\n  json: {\n    candidateName,\n    candidateEmail,\n    roleApplied,\n    yearsExperience:    yearsExp,\n    coverNote,\n    client_slug:        clientSlug,\n    typeformResponseId: item.typeformResponseId ?? '',\n    submittedAt:        item.submittedAt,\n    idempotencyKey:     idemKey\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000006",
+      "name": "Postgres — Load Client Config",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1280, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 3,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, slug, score_threshold, default_role,\n  prompt_template, success_subject, success_body, reject_subject, reject_body,\n  client_found\nFROM (\n  SELECT c.id, c.name, c.slug, c.score_threshold, c.default_role,\n    sp.prompt_template,\n    et_s.subject AS success_subject, et_s.body AS success_body,\n    et_r.subject AS reject_subject, et_r.body AS reject_body,\n    true AS client_found,\n    1    AS sort_order\n  FROM clients c\n  JOIN scoring_prompts sp\n    ON sp.client_id = c.id AND sp.active = true\n  LEFT JOIN email_templates et_s\n    ON et_s.client_id = c.id AND et_s.template_type = 'success'\n  LEFT JOIN email_templates et_r\n    ON et_r.client_id = c.id AND et_r.template_type = 'rejection'\n  WHERE c.slug = $1 AND c.active = true\n  UNION ALL\n  SELECT NULL, NULL, NULL, NULL, NULL,\n         NULL, NULL, NULL, NULL, NULL,\n         false, 2\n) q\nORDER BY sort_order ASC\nLIMIT 1",
+        "options": {
+          "queryReplacement": "={{ $json.client_slug }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "[POSTGRES_CREDENTIAL_ID]",
+          "name": "[Recruitment] Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000007",
+      "name": "Check Client + Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 2 | Check Client + Merge ──────────────────────────────────────\n// UNION ALL in Postgres guarantees exactly 1 row (client_found true/false).\n// Merges Postgres client config with normalized candidate data.\n// Uses $() selector (n8n v1 API) to reference earlier node output.\n// ─────────────────────────────────────────────────────────────────────────\n\nconst pg   = $input.first().json;\nconst cand = $('Normalize Candidate').first().json;\n\nreturn [{\n  json: {\n    clientFound:        pg.client_found === true,\n    // ── Candidate ──\n    candidateName:      cand.candidateName,\n    candidateEmail:     cand.candidateEmail,\n    roleApplied:        cand.roleApplied,\n    yearsExperience:    cand.yearsExperience,\n    coverNote:          cand.coverNote,\n    submittedAt:        cand.submittedAt,\n    typeformResponseId: cand.typeformResponseId,\n    idempotencyKey:     cand.idempotencyKey,\n    client_slug:        cand.client_slug,\n    // ── Client config (null fields when clientFound = false) ──\n    clientId:       pg.id              ?? null,\n    clientName:     pg.name            ?? null,\n    scoreThreshold: pg.score_threshold ?? 60,\n    defaultRole:    pg.default_role    ?? cand.roleApplied,\n    promptTemplate: pg.prompt_template ?? '',\n    successSubject: pg.success_subject ?? '',\n    successBody:    pg.success_body    ?? '',\n    rejectSubject:  pg.reject_subject  ?? '',\n    rejectBody:     pg.reject_body     ?? ''\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000008",
+      "name": "IF: Client Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1800, 300],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-client-found",
+              "leftValue": "={{ $json.clientFound }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000009",
+      "name": "Respond — 404 Unknown Client",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [2060, 520],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"error\",\"reason\":\"unknown_client\"}",
+        "options": {
+          "responseCode": 404
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000010",
+      "name": "Set Execution Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2060, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 2 | Set Execution Context ─────────────────────────────────────\n// Writes candidate + session metadata into $execution.customData.\n// Error handler (00-error-handler) reads these fields to include\n// candidate context in Slack alert cards.\n// ─────────────────────────────────────────────────────────────────────────\n\nconst item = $input.first().json;\n\n$execution.customData.set('candidate_name',  item.candidateName);\n$execution.customData.set('candidate_email', item.candidateEmail);\n$execution.customData.set('client_slug',     item.client_slug);\n$execution.customData.set('idempotency_key', item.idempotencyKey);\n$execution.customData.set('role_applied',    item.roleApplied);\n\nreturn [{ json: item }]; // pass-through — full merged payload flows to Respond 200"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000011",
+      "name": "Respond — 200 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [2320, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"accepted\",\"message\":\"Application received and queued for review\"}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000012",
+      "name": "Execute Workflow — AI Scoring",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [2580, 300],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "bYrHcLA7qYw1ExGw",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook — Typeform": {
+      "main": [
+        [
+          { "node": "HMAC Verify + Extract", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "HMAC Verify + Extract": {
+      "main": [
+        [
+          { "node": "IF: Valid Signature", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "IF: Valid Signature": {
+      "main": [
+        [
+          { "node": "Normalize Candidate", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Respond — 403 Rejected", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Normalize Candidate": {
+      "main": [
+        [
+          { "node": "Postgres — Load Client Config", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Postgres — Load Client Config": {
+      "main": [
+        [
+          { "node": "Check Client + Merge", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Check Client + Merge": {
+      "main": [
+        [
+          { "node": "IF: Client Found", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "IF: Client Found": {
+      "main": [
+        [
+          { "node": "Set Execution Context", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Respond — 404 Unknown Client", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Set Execution Context": {
+      "main": [
+        [
+          { "node": "Respond — 200 Accepted", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Respond — 200 Accepted": {
+      "main": [
+        [
+          { "node": "Execute Workflow — AI Scoring", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "errorWorkflow": "w6cdIL8Zop9xzd5Z"
+  },
+  "_meta": {
+    "n8nWorkflowId": "IzhgZSsKa1UnZbmp",
+    "instance": "designshopp.app.n8n.cloud",
+    "batch": "Batch 2 of 7 — linked to Batch 3 (bYrHcLA7qYw1ExGw)",
+    "project": "Project 5 — Recruitment Pipeline",
+    "credentialSetup": {
+      "Postgres — Load Client Config": {
+        "credentialType": "postgres",
+        "placeholder": "[POSTGRES_CREDENTIAL_ID]",
+        "setupNote": "Create a Postgres credential named '[Recruitment] Supabase Postgres' using your Supabase project's connection string (Settings → Database → Connection string → URI). See SETUP.md for required tables: clients, scoring_prompts, email_templates."
+      }
+    },
+    "codeNodeContext": "n8n Code nodes use step-through require() for built-in Node.js modules (crypto, etc.) — valid n8n sandbox syntax. Not Vercel Workflow scope.",
+    "activationNote": "Activate 00-error-handler FIRST. Then activate this workflow. Webhook URL after activation: https://designshopp.app.n8n.cloud/webhook/recruitment/intake. Set this as your Typeform form's webhook endpoint. Configure the HMAC secret (Settings → Webhooks in Typeform) and set it as the TYPEFORM_HMAC_SECRET environment variable in n8n (Settings → Variables).",
+    "postgresSchema": {
+      "clients": "id, name, slug (unique), score_threshold (int, default 60), default_role (text), active (bool)",
+      "scoring_prompts": "id, client_id (fk), prompt_template (text), active (bool)",
+      "email_templates": "id, client_id (fk), template_type ('success'|'rejection'), subject (text), body (text)"
+    },
+    "typeformHiddenFields": {
+      "client_slug": "Required. Must match a slug in the clients table.",
+      "full_name": "Optional fallback if full_name question ref is not 'full_name'",
+      "email": "Optional fallback if email question ref is not 'email'",
+      "role": "Optional fallback if role question ref is not 'role'"
+    },
+    "typeformFieldRefs": {
+      "full_name": "Candidate full name (Short text question)",
+      "email": "Candidate email (Email question)",
+      "role": "Role applying for (Short text or Dropdown question)",
+      "experience": "Years of experience (Number question)",
+      "cover_note": "Cover note / motivation (Long text question)"
+    }
+  }
+}

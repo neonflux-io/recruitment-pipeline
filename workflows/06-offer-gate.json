@@ -1,0 +1,348 @@
+{
+  "_meta": {
+    "workflow": "06-offer-gate",
+    "batch": 7,
+    "description": "[Recruitment] 06 — Offer Gate: Standalone manual webhook trigger. Receives offer payload from recruiter system, verifies HMAC-SHA256 signature, normalizes fields, sends Slack approval request via native Send and Wait for Response node. On approval: sends personalized offer email via Gmail and logs row to Google Sheets. On rejection: sends polite withdrawal email and logs row to Google Sheets. Offers NEVER auto-send — every offer requires explicit human approval via Slack. NOT part of the automated scoring/CRM sub-workflow chain; independently triggered by recruiter.",
+    "n8nWorkflowId": "nB3kTqY7xPmWdL9c",
+    "validationStatus": "PASS — 0 errors, 13 advisory warnings (4 × 50%-confidence columns.value __rl format false-positives — column values in defineBelow mode are plain expressions not resource locators; 4 × onError advisory + 2 × Code error handling + 1 × webhook immediate-response + 1 × Slack rate limit + 1 × IF main[1] false-positive — all covered by master error workflow w6cdIL8Zop9xzd5Z and retryOnFail: true on all external API nodes)",
+    "qaStatus": "ALL PASS — PM · Lead n8n Eng · Lead Eng · Design Eng · QA Eng · Best Practices (Batch 7)",
+    "exportedAt": "2026-04-13",
+    "codeNodeContext": "n8n Code nodes use step-through require() pattern; crypto/require calls are runtime n8n sandbox features, not browser scope",
+    "placeholders": [
+      "[OFFER_WEBHOOK_SECRET] — replace with your HMAC-SHA256 signing secret. Must match the secret used by your recruiter dispatch system to sign offer webhook payloads. Any secure random string (32+ chars recommended).",
+      "[SLACK_CREDENTIAL_ID] — replace with your n8n slackApi credential ID. Same credential used in 04-comms-routing.",
+      "[SLACK_OPS_CHANNEL_ID] — replace with your Slack channel ID for offer approvals (e.g. C0123456789). The approving recruiter/manager must be in this channel.",
+      "[GMAIL_CREDENTIAL_ID] — replace with your n8n gmailOAuth2 credential ID. Same credential used in 04-comms-routing.",
+      "[GOOGLE_SHEETS_CREDENTIAL_ID] — replace with your n8n googleSheetsOAuth2Api credential ID.",
+      "[OFFER_LOG_SPREADSHEET_ID] — replace with your Google Sheets spreadsheet ID for the offer log. Find in the sheet URL: /spreadsheets/d/{id}/",
+      "[OFFER_LOG_SHEET_NAME] — replace with your sheet tab name (e.g. 'Offers'). Sheet must have headers in row 1: candidate_name, candidate_email, role_applied, client_name, offer_details, decision, offered_at, logged_at"
+    ],
+    "offerLogColumnHeaders": [
+      "candidate_name", "candidate_email", "role_applied", "client_name",
+      "offer_details", "decision", "offered_at", "logged_at"
+    ],
+    "webhookPayloadShape": {
+      "candidateName":  "string (required)",
+      "candidateEmail": "string (required)",
+      "roleApplied":    "string (required)",
+      "offerDetails":   "string (required) — compensation, start date, benefits, any relevant details",
+      "clientName":     "string (optional — defaults to 'Client')",
+      "requestedAt":    "string (required) — ISO 8601 UTC timestamp e.g. '2026-04-13T14:30:00Z'. Requests older than 5 minutes are rejected for replay protection."
+    },
+    "hmacSignatureFormat": "HMAC-SHA256. Header: x-offer-signature: sha256=<hex>. Computed over raw UTF-8 request body string using shared secret. Header name must be lowercase.",
+    "approvalResponseField": "$json.data.approved — boolean true (Approved) or false (Rejected) set by Slack sendAndWait node on workflow resume.",
+    "standaloneNote": "This workflow is NOT called by any other pipeline workflow. It fires only when a recruiter manually POSTs to the webhook URL. It operates outside the automated scoring and CRM chain."
+  },
+  "id": "nB3kTqY7xPmWdL9c",
+  "name": "[Recruitment] 06 — Offer Gate",
+  "active": false,
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000001",
+      "name": "Offer Gate Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "offer-gate",
+        "authentication": "none",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000002",
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 7 | Verify HMAC Signature ─────────────────────────────────────────\n// Verifies HMAC-SHA256 signature on the raw webhook body.\n// Signature expected in header x-offer-signature: sha256=<hex>\n// Computed over raw body bytes using secret from env var OFFER_WEBHOOK_SECRET.\n// Uses timing-safe comparison to prevent timing oracle attacks.\n// Rejects payloads with requestedAt older than 5 minutes (replay protection).\n// Throws on any auth failure — no offer data flows without valid auth.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst crypto    = require('crypto');\nconst inputItem = $input.first();\nconst item      = inputItem.json;\n\n// ── Raw body: Webhook rawBody:true stores bytes in binary['data'] as base64 ──\nconst b64     = inputItem.binary?.['data']?.data ?? '';\nconst rawBody = b64\n  ? Buffer.from(b64, 'base64').toString('utf8')\n  : JSON.stringify(item.body ?? {});\n\nconst headers   = item.headers ?? {};\nconst sigHeader = String(headers['x-offer-signature'] ?? '').trim();\nconst secret    = $env['OFFER_WEBHOOK_SECRET'];\n\nif (!sigHeader) {\n  throw new Error('Missing x-offer-signature header. Unauthorized request rejected.');\n}\n\nif (!secret) {\n  throw new Error('OFFER_WEBHOOK_SECRET environment variable not configured.');\n}\n\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');\n\n// ── Timing-safe comparison (prevents timing oracle on secret length) ──\nconst sigBuf = Buffer.from(sigHeader, 'utf8');\nconst expBuf = Buffer.from(expected,  'utf8');\n\nlet valid = false;\nif (sigBuf.length === expBuf.length) {\n  valid = crypto.timingSafeEqual(sigBuf, expBuf);\n}\n\nif (!valid) {\n  throw new Error('HMAC signature mismatch. Unauthorized request rejected.');\n}\n\n// ── Parse body after verification ──\nconst payload = JSON.parse(rawBody);\n\n// ── Replay protection: requestedAt is REQUIRED — reject if absent or expired ──\n// Caller must include requestedAt (ISO string) in the JSON body.\nif (!payload.requestedAt) {\n  throw new Error('Missing requestedAt field. Replay protection requires an ISO timestamp in requestedAt.');\n}\nconst age = Date.now() - new Date(payload.requestedAt).getTime();\nif (age > 5 * 60 * 1000) {\n  throw new Error('Offer request expired (older than 5 minutes). Replay rejected.');\n}\n\nreturn [{ json: payload }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000003",
+      "name": "Normalize Offer Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 7 | Normalize Offer Payload ───────────────────────────────────────\n// Validates required fields and normalizes offer data types.\n// Sets execution context so error handler includes candidate info in Slack alerts.\n// Throws on missing required fields — no partial offer proceeds downstream.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst item = $input.first().json;\n\nconst required = ['candidateName', 'candidateEmail', 'roleApplied', 'offerDetails'];\nfor (const field of required) {\n  if (!item[field]) {\n    throw new Error('Missing required field: ' + field + '. Offer payload rejected.');\n  }\n}\n\nconst payload = {\n  candidateName:  String(item.candidateName).trim(),\n  candidateEmail: String(item.candidateEmail).trim().toLowerCase(),\n  roleApplied:    String(item.roleApplied).trim(),\n  clientName:     String(item.clientName ?? '').trim() || 'Client',\n  offerDetails:   String(item.offerDetails).trim(),\n  offeredAt:      new Date().toISOString()\n};\n\n$execution.customData.set('candidate_name',  payload.candidateName);\n$execution.customData.set('candidate_email', payload.candidateEmail);\n$execution.customData.set('role_applied',    payload.roleApplied);\n$execution.customData.set('stage',           'offer_gate');\n\nreturn [{ json: payload }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000004",
+      "name": "Slack — Approval Request",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [1020, 300],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendAndWait",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "[SLACK_OPS_CHANNEL_ID]",
+          "mode": "id"
+        },
+        "message": "={{ '*Offer Approval Required*\\n\\n*Candidate:* ' + $json.candidateName + '\\n*Role:* ' + $json.roleApplied + '\\n*Client:* ' + $json.clientName + '\\n\\n*Offer Details:*\\n' + $json.offerDetails + '\\n\\nPlease review the details and click Approve or Reject below. Offers are never sent without explicit approval.' }}",
+        "responseType": "approval",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "Approve Offer",
+            "buttonApprovalStyle": "primary",
+            "disapproveLabel": "Reject Offer",
+            "buttonDisapprovalStyle": "secondary"
+          }
+        }
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "[SLACK_CREDENTIAL_ID]",
+          "name": "[Recruitment] Slack"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000005",
+      "name": "IF: Offer Approved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1280, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-approved",
+              "leftValue": "={{ $json.data.approved }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000006",
+      "name": "Gmail — Send Offer Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [1540, 160],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.candidateEmail }}",
+        "subject": "={{ 'Your Offer Letter — ' + $json.roleApplied + ' at ' + $json.clientName }}",
+        "emailType": "text",
+        "message": "={{ 'Dear ' + $json.candidateName + ',\\n\\nWe are delighted to extend an offer of employment for the position of ' + $json.roleApplied + ' at ' + $json.clientName + '.\\n\\n' + $json.offerDetails + '\\n\\nPlease review this offer and reach out with any questions. We look forward to your response.\\n\\nBest regards,\\n' + $json.clientName + ' Recruitment Team' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "[GMAIL_CREDENTIAL_ID]",
+          "name": "[Recruitment] Gmail"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Gmail — Send Withdrawal Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [1540, 440],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.candidateEmail }}",
+        "subject": "={{ 'Update Regarding Your Application — ' + $json.roleApplied }}",
+        "emailType": "text",
+        "message": "={{ 'Dear ' + $json.candidateName + ',\\n\\nThank you for your patience during our review process for the ' + $json.roleApplied + ' position at ' + $json.clientName + '.\\n\\nAfter careful consideration, we have decided not to proceed with an offer at this time. This decision reflects our current business requirements and is not a reflection of your qualifications.\\n\\nWe appreciate your interest and wish you continued success in your search.\\n\\nBest regards,\\n' + $json.clientName + ' Recruitment Team' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "[GMAIL_CREDENTIAL_ID]",
+          "name": "[Recruitment] Gmail"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000008",
+      "name": "Google Sheets — Log Offer Sent",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1800, 160],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "[OFFER_LOG_SPREADSHEET_ID]",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "[OFFER_LOG_SHEET_NAME]",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "candidate_name":  "={{ $json.candidateName }}",
+            "candidate_email": "={{ $json.candidateEmail }}",
+            "role_applied":    "={{ $json.roleApplied }}",
+            "client_name":     "={{ $json.clientName }}",
+            "offer_details":   "={{ $json.offerDetails }}",
+            "decision":        "OFFER_SENT",
+            "offered_at":      "={{ $json.offeredAt }}",
+            "logged_at":       "={{ new Date().toISOString() }}"
+          },
+          "schema": [
+            {"id": "candidate_name",  "type": "string", "display": true, "required": false, "displayName": "candidate_name",  "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "candidate_email", "type": "string", "display": true, "required": false, "displayName": "candidate_email", "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "role_applied",    "type": "string", "display": true, "required": false, "displayName": "role_applied",    "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "client_name",     "type": "string", "display": true, "required": false, "displayName": "client_name",     "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "offer_details",   "type": "string", "display": true, "required": false, "displayName": "offer_details",   "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "decision",        "type": "string", "display": true, "required": false, "displayName": "decision",        "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "offered_at",      "type": "string", "display": true, "required": false, "displayName": "offered_at",      "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "logged_at",       "type": "string", "display": true, "required": false, "displayName": "logged_at",       "defaultMatch": false, "canBeUsedToMatch": true}
+          ],
+          "matchingColumns": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "valueInputMode": "RAW"
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "[GOOGLE_SHEETS_CREDENTIAL_ID]",
+          "name": "[Recruitment] Google Sheets"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000009",
+      "name": "Google Sheets — Log Offer Withdrawn",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1800, 440],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "[OFFER_LOG_SPREADSHEET_ID]",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "[OFFER_LOG_SHEET_NAME]",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "candidate_name":  "={{ $json.candidateName }}",
+            "candidate_email": "={{ $json.candidateEmail }}",
+            "role_applied":    "={{ $json.roleApplied }}",
+            "client_name":     "={{ $json.clientName }}",
+            "offer_details":   "={{ $json.offerDetails }}",
+            "decision":        "OFFER_WITHDRAWN",
+            "offered_at":      "={{ $json.offeredAt }}",
+            "logged_at":       "={{ new Date().toISOString() }}"
+          },
+          "schema": [
+            {"id": "candidate_name",  "type": "string", "display": true, "required": false, "displayName": "candidate_name",  "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "candidate_email", "type": "string", "display": true, "required": false, "displayName": "candidate_email", "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "role_applied",    "type": "string", "display": true, "required": false, "displayName": "role_applied",    "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "client_name",     "type": "string", "display": true, "required": false, "displayName": "client_name",     "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "offer_details",   "type": "string", "display": true, "required": false, "displayName": "offer_details",   "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "decision",        "type": "string", "display": true, "required": false, "displayName": "decision",        "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "offered_at",      "type": "string", "display": true, "required": false, "displayName": "offered_at",      "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "logged_at",       "type": "string", "display": true, "required": false, "displayName": "logged_at",       "defaultMatch": false, "canBeUsedToMatch": true}
+          ],
+          "matchingColumns": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "valueInputMode": "RAW"
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "[GOOGLE_SHEETS_CREDENTIAL_ID]",
+          "name": "[Recruitment] Google Sheets"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Offer Gate Webhook": {
+      "main": [[{"node": "Verify HMAC Signature", "type": "main", "index": 0}]]
+    },
+    "Verify HMAC Signature": {
+      "main": [[{"node": "Normalize Offer Payload", "type": "main", "index": 0}]]
+    },
+    "Normalize Offer Payload": {
+      "main": [[{"node": "Slack — Approval Request", "type": "main", "index": 0}]]
+    },
+    "Slack — Approval Request": {
+      "main": [[{"node": "IF: Offer Approved", "type": "main", "index": 0}]]
+    },
+    "IF: Offer Approved": {
+      "main": [
+        [{"node": "Gmail — Send Offer Email",      "type": "main", "index": 0}],
+        [{"node": "Gmail — Send Withdrawal Email", "type": "main", "index": 0}]
+      ]
+    },
+    "Gmail — Send Offer Email": {
+      "main": [[{"node": "Google Sheets — Log Offer Sent",      "type": "main", "index": 0}]]
+    },
+    "Gmail — Send Withdrawal Email": {
+      "main": [[{"node": "Google Sheets — Log Offer Withdrawn", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "errorWorkflow": "w6cdIL8Zop9xzd5Z",
+    "availableInMCP": false
+  }
+}

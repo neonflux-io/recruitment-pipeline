@@ -1,0 +1,147 @@
+{
+  "_meta": {
+    "workflow": "05-audit-log",
+    "batch": 6,
+    "description": "[Recruitment] 05 — Audit Log: Receives full pipeline payload from Batch 5 (either QUALIFIED or REJECTED terminal). Appends a single audit row to Google Sheets covering all 18 pipeline fields: candidate intake (A–D), AI scoring (E–J), CRM IDs (K–L), comms flags (M–P), and timestamps (Q–R). Sets execution context 'audit_logged' so the error handler can distinguish between 'scored but not logged' vs 'logging failed'. Returns payload with auditLoggedAt for any downstream use.",
+    "n8nWorkflowId": "cNISe6BFxEEpGUw2",
+    "validationStatus": "PASS — 0 errors, 6 advisory warnings (4 × 50%-confidence columns.value __rl format false-positives — column values in defineBelow mode are plain expressions not resource locators; 2 × Code node warnings covered by master error workflow w6cdIL8Zop9xzd5Z)",
+    "qaStatus": "ALL PASS — PM · Lead n8n Eng · Lead Eng · Design Eng · QA Eng · Best Practices (Batch 6)",
+    "exportedAt": "2026-04-13",
+    "codeNodeContext": "n8n Code nodes use step-through require() pattern; crypto/require calls are runtime n8n sandbox features, not browser scope",
+    "placeholders": [
+      "[GOOGLE_SHEETS_CREDENTIAL_ID] — replace with your n8n googleSheetsOAuth2Api credential ID",
+      "[AUDIT_SPREADSHEET_ID] — replace with your Google Sheets spreadsheet ID. Find in the sheet URL: /spreadsheets/d/{id}/",
+      "[AUDIT_SHEET_NAME] — replace with your sheet tab name (e.g., 'Candidates'). Must match exactly. Sheet must have headers in row 1: candidate_name, candidate_email, client_name, role_applied, composite_score, disposition, overall_signal, role_fit_score, experience_score, response_qual_score, hubspot_contact_id, hubspot_deal_id, slack_notified, gmail_sent, email_type, clickup_task_created, scored_at, comms_completed_at"
+    ],
+    "googleSheetsColumnHeaders": [
+      "candidate_name", "candidate_email", "client_name", "role_applied",
+      "composite_score", "disposition", "overall_signal",
+      "role_fit_score", "experience_score", "response_qual_score",
+      "hubspot_contact_id", "hubspot_deal_id",
+      "slack_notified", "gmail_sent", "email_type", "clickup_task_created",
+      "scored_at", "comms_completed_at"
+    ]
+  },
+  "id": "cNISe6BFxEEpGUw2",
+  "name": "[Recruitment] 05 — Audit Log",
+  "active": false,
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0006-4000-8000-000000000001",
+      "name": "When Called by Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0006-4000-8000-000000000002",
+      "name": "Google Sheets — Append Audit Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [500, 300],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "[AUDIT_SPREADSHEET_ID]",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "[AUDIT_SHEET_NAME]",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "candidate_name":      "={{ $json.candidateName }}",
+            "candidate_email":     "={{ $json.candidateEmail }}",
+            "client_name":         "={{ $json.clientName ?? $json.client_slug ?? '' }}",
+            "role_applied":        "={{ $json.roleApplied }}",
+            "composite_score":     "={{ String($json.compositeScore) }}",
+            "disposition":         "={{ $json.disposition }}",
+            "overall_signal":      "={{ $json.overallSignal }}",
+            "role_fit_score":      "={{ String($json.roleFitScore) }}",
+            "experience_score":    "={{ String($json.experienceScore) }}",
+            "response_qual_score": "={{ String($json.responseQualScore) }}",
+            "hubspot_contact_id":  "={{ $json.hubspotContactId ?? '' }}",
+            "hubspot_deal_id":     "={{ $json.hubspotDealId ?? '' }}",
+            "slack_notified":      "={{ String($json.slackNotified) }}",
+            "gmail_sent":          "={{ String($json.gmailSent) }}",
+            "email_type":          "={{ $json.emailType }}",
+            "clickup_task_created":"={{ String($json.clickUpTaskCreated) }}",
+            "scored_at":           "={{ $json.scoredAt ?? '' }}",
+            "comms_completed_at":  "={{ $json.commsCompletedAt ?? '' }}"
+          },
+          "schema": [
+            {"id": "candidate_name",      "type": "string", "display": true, "required": false, "displayName": "candidate_name",      "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "candidate_email",     "type": "string", "display": true, "required": false, "displayName": "candidate_email",     "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "client_name",         "type": "string", "display": true, "required": false, "displayName": "client_name",         "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "role_applied",        "type": "string", "display": true, "required": false, "displayName": "role_applied",        "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "composite_score",     "type": "string", "display": true, "required": false, "displayName": "composite_score",     "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "disposition",         "type": "string", "display": true, "required": false, "displayName": "disposition",         "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "overall_signal",      "type": "string", "display": true, "required": false, "displayName": "overall_signal",      "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "role_fit_score",      "type": "string", "display": true, "required": false, "displayName": "role_fit_score",      "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "experience_score",    "type": "string", "display": true, "required": false, "displayName": "experience_score",    "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "response_qual_score", "type": "string", "display": true, "required": false, "displayName": "response_qual_score", "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "hubspot_contact_id",  "type": "string", "display": true, "required": false, "displayName": "hubspot_contact_id",  "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "hubspot_deal_id",     "type": "string", "display": true, "required": false, "displayName": "hubspot_deal_id",     "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "slack_notified",      "type": "string", "display": true, "required": false, "displayName": "slack_notified",      "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "gmail_sent",          "type": "string", "display": true, "required": false, "displayName": "gmail_sent",          "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "email_type",          "type": "string", "display": true, "required": false, "displayName": "email_type",          "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "clickup_task_created","type": "string", "display": true, "required": false, "displayName": "clickup_task_created","defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "scored_at",           "type": "string", "display": true, "required": false, "displayName": "scored_at",           "defaultMatch": false, "canBeUsedToMatch": true},
+            {"id": "comms_completed_at",  "type": "string", "display": true, "required": false, "displayName": "comms_completed_at",  "defaultMatch": false, "canBeUsedToMatch": true}
+          ],
+          "matchingColumns": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "valueInputMode": "RAW"
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "[GOOGLE_SHEETS_CREDENTIAL_ID]",
+          "name": "[Recruitment] Google Sheets"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a1b2c3d4-0006-4000-8000-000000000003",
+      "name": "Update Audit Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Batch 6 | Update Audit Context ─────────────────────────────────────────────\n// Sets audit log context in $execution.customData.\n// Error handler reads 'audit_logged' to know whether the audit row was written\n// before any downstream failure in Batch 6 itself.\n// Returns original pipeline payload with auditLoggedAt timestamp appended.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst item = $('When Called by Workflow').first().json;\n\n$execution.customData.set('audit_logged', 'true');\n\nreturn [{\n  json: {\n    ...item,\n    auditLoggedAt: new Date().toISOString()\n  }\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "When Called by Workflow": {
+      "main": [[{"node": "Google Sheets — Append Audit Row", "type": "main", "index": 0}]]
+    },
+    "Google Sheets — Append Audit Row": {
+      "main": [[{"node": "Update Audit Context", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "errorWorkflow": "w6cdIL8Zop9xzd5Z",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

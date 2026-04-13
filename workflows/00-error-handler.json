@@ -1,0 +1,98 @@
+{
+  "name": "[Recruitment] 00 — Error Handler",
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "parameters": {}
+    },
+    {
+      "id": "a1b2c3d4-0001-4000-8000-000000000002",
+      "name": "Format Error Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ─── Project 5 | Batch 1 — Error Handler ─────────────────────────────────\n// Handles BOTH error schemas from n8n Error Trigger:\n//   Schema A: item.execution (error in a regular workflow node)\n//   Schema B: item.trigger   (error in the trigger node itself)\n// Builds pre-sanitized Slack Block Kit JSON for dispatch.\n// ─────────────────────────────────────────────────────────────────────────\n\nconst item = $input.first().json;\n\n// ── Resolve error payload across both schemas ──\nconst workflow  = item?.workflow ?? {};\nconst exec      = item?.execution ?? null;\nconst trigger   = item?.trigger   ?? null;\n\nconst workflowName = workflow?.name ?? 'Unknown Workflow';\nconst workflowId   = workflow?.id   ?? 'Unknown';\n\nlet errorMessage, failedNode, executionId, executionUrl, mode, errorSchema;\n\nif (exec) {\n  // Schema A: normal execution error\n  errorMessage  = exec.error?.message         ?? 'No error message provided';\n  failedNode    = exec.lastNodeExecuted        ?? 'Unknown Node';\n  executionId   = exec.id                     ?? 'N/A';\n  executionUrl  = exec.url                    ?? '#';\n  mode          = exec.mode                   ?? 'unknown';\n  errorSchema   = 'execution';\n} else if (trigger) {\n  // Schema B: trigger-level failure (workflow never started)\n  errorMessage  = trigger.error?.message      ?? 'Trigger failed';\n  failedNode    = 'Trigger Node (workflow did not execute)';\n  executionId   = 'N/A';\n  executionUrl  = '#';\n  mode          = trigger.mode                ?? 'trigger';\n  errorSchema   = 'trigger';\n} else {\n  // Fallback: unknown error payload structure\n  errorMessage  = 'Unknown error';\n  failedNode    = 'Unknown';\n  executionId   = 'N/A';\n  executionUrl  = '#';\n  mode          = 'unknown';\n  errorSchema   = 'unknown';\n}\n\n// ── Candidate name (populated via execution.customData in Batch 2+) ──\nconst candidateName = item?.execution?.customData?.candidate_name ?? 'N/A';\n\n// ── Priority classification ──\n// LOW  = transient infrastructure errors (5xx, rate limits, timeouts)\n// HIGH = logic/config failures requiring human investigation\nconst transientPatterns = [\n  /\\b503\\b/, /\\b500\\b/, /\\b429\\b/,\n  /rate.?limit/i, /too.?many.?requests/i, /service.?unavailable/i,\n  /timeout/i,    /timed.?out/i,           /temporarily.?unavailable/i,\n  /ECONNRESET/i, /ETIMEDOUT/i,            /ENOTFOUND/i,\n  /bad.?gateway/i, /gateway.?timeout/i\n];\nconst isTransient   = transientPatterns.some(p => p.test(errorMessage));\nconst priority      = isTransient ? 'LOW' : 'HIGH';\nconst priorityEmoji = priority === 'HIGH' ? '❗' : '⚠️';\n\n// ── Safe string helper ──\n// Collapses newlines/tabs, trims, caps at 500 chars\nconst safe = (val, fallback = 'N/A') =>\n  String(val ?? fallback)\n    .replace(/\\r?\\n/g, ' ')\n    .replace(/\\t/g, ' ')\n    .trim()\n    .substring(0, 500);\n\nconst sWorkflowName  = safe(workflowName);\nconst sFailedNode    = safe(failedNode);\nconst sErrorMessage  = safe(errorMessage);\nconst sExecutionId   = safe(executionId);\nconst sCandidateName = safe(candidateName);\nconst timestamp      = new Date().toISOString();\n\n// ── Slack fallback text (mobile notification preview) ──\nconst slackFallback = `${priorityEmoji} [${priority}] Error in \"${sWorkflowName}\" at \"${sFailedNode}\" — ${sErrorMessage}`;\n\n// ── Slack Block Kit blocks ──\nconst blocks = [\n  {\n    type: 'header',\n    text: { type: 'plain_text', text: `${priorityEmoji}  [${priority}] Workflow Error — Recruitment Pipeline`, emoji: true }\n  },\n  {\n    type: 'section',\n    fields: [\n      { type: 'mrkdwn', text: `*Workflow*\\n${sWorkflowName}` },\n      { type: 'mrkdwn', text: `*Failed At*\\n\\`${sFailedNode}\\`` }\n    ]\n  },\n  {\n    type: 'section',\n    text: { type: 'mrkdwn', text: `*Error Message*\\n\\`\\`\\`${sErrorMessage}\\`\\`\\`` }\n  },\n  {\n    type: 'section',\n    fields: [\n      { type: 'mrkdwn', text: `*Priority*\\n${priorityEmoji} ${priority}` },\n      { type: 'mrkdwn', text: `*Candidate*\\n${sCandidateName}` }\n    ]\n  },\n  {\n    type: 'actions',\n    elements: [\n      {\n        type: 'button',\n        text: { type: 'plain_text', text: '↗ View Execution', emoji: false },\n        url: executionUrl,\n        style: 'danger'\n      }\n    ]\n  },\n  {\n    type: 'context',\n    elements: [\n      { type: 'mrkdwn', text: `Execution \\`${sExecutionId}\\`  •  Schema: ${errorSchema}  •  ${timestamp}` }\n    ]\n  },\n  { type: 'divider' }\n];\n\nreturn [{\n  json: {\n    workflowName:  sWorkflowName,\n    executionId:   sExecutionId,\n    executionUrl,\n    errorMessage:  sErrorMessage,\n    failedNode:    sFailedNode,\n    candidateName: sCandidateName,\n    priority,\n    errorSchema,\n    mode,\n    timestamp,\n    slackFallback,\n    slackBlocks: JSON.stringify(blocks)\n  }\n}];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0001-4000-8000-000000000003",
+      "name": "Slack — #ops-alerts",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [760, 300],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "ops-alerts"
+        },
+        "messageType": "block",
+        "text": "={{ $json.slackFallback }}",
+        "blocksUi": "={{ $json.slackBlocks }}"
+      },
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "[SLACK_CREDENTIAL_ID]",
+          "name": "[Recruitment] Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Payload": {
+      "main": [
+        [
+          {
+            "node": "Slack — #ops-alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  },
+  "_meta": {
+    "n8nWorkflowId": "w6cdIL8Zop9xzd5Z",
+    "instance": "designshopp.app.n8n.cloud",
+    "batch": "Batch 1 of 7",
+    "project": "Project 5 — Recruitment Pipeline",
+    "credentialSetup": {
+      "Slack — #ops-alerts": {
+        "credentialType": "slackOAuth2Api",
+        "placeholder": "[SLACK_CREDENTIAL_ID]",
+        "setupNote": "Create a Slack OAuth2 credential named '[Recruitment] Slack Bot' in n8n, then attach to this node. See SETUP.md for required Slack scopes."
+      }
+    },
+    "activationNote": "After attaching the Slack credential, activate this workflow FIRST before activating any other Recruitment workflow. Then set this workflow ID as the Error Workflow in each of the 6 other workflows' Settings."
+  }
+}
