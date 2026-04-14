@@ -83,7 +83,7 @@
   },
   "_meta": {
     "n8nWorkflowId": "w6cdIL8Zop9xzd5Z",
-    "instance": "designshopp.app.n8n.cloud",
+    "instance": "[YOUR_N8N_INSTANCE]",
     "batch": "Batch 1 of 7",
     "project": "Project 5 — Recruitment Pipeline",
     "credentialSetup": {
