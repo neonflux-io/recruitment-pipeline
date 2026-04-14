@@ -17,7 +17,6 @@ Thumbs.db
 desktop.ini
 
 # Editor artifacts
-.vscode/
 .idea/
 *.swp
 
@@ -27,3 +26,7 @@ node_modules/
 # Workflow JSONs are intentionally NOT ignored — they are safe to commit.
 # Credentials are stored by n8n credential ID only, never as actual API keys.
 # workflows/*.json — NOT ignored
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

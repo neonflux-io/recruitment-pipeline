@@ -290,7 +290,7 @@
   },
   "_meta": {
     "n8nWorkflowId": "IzhgZSsKa1UnZbmp",
-    "instance": "designshopp.app.n8n.cloud",
+    "instance": "[YOUR_N8N_INSTANCE]",
     "batch": "Batch 2 of 7 — linked to Batch 3 (bYrHcLA7qYw1ExGw)",
     "project": "Project 5 — Recruitment Pipeline",
     "credentialSetup": {
@@ -301,7 +301,7 @@
       }
     },
     "codeNodeContext": "n8n Code nodes use step-through require() for built-in Node.js modules (crypto, etc.) — valid n8n sandbox syntax. Not Vercel Workflow scope.",
-    "activationNote": "Activate 00-error-handler FIRST. Then activate this workflow. Webhook URL after activation: https://designshopp.app.n8n.cloud/webhook/recruitment/intake. Set this as your Typeform form's webhook endpoint. Configure the HMAC secret (Settings → Webhooks in Typeform) and set it as the TYPEFORM_HMAC_SECRET environment variable in n8n (Settings → Variables).",
+    "activationNote": "Activate 00-error-handler FIRST. Then activate this workflow. Webhook URL after activation: https://[YOUR_N8N_INSTANCE]/webhook/recruitment/intake. Set this as your Typeform form's webhook endpoint. Configure the HMAC secret (Settings → Webhooks in Typeform) and set it as the TYPEFORM_HMAC_SECRET environment variable in n8n (Settings → Variables).",
     "postgresSchema": {
       "clients": "id, name, slug (unique), score_threshold (int, default 60), default_role (text), active (bool)",
       "scoring_prompts": "id, client_id (fk), prompt_template (text), active (bool)",
